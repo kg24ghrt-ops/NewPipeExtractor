@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Objects;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 /**
  * Class which generates DASH manifests of YouTube post-live DVR streams (which use the
@@ -137,9 +138,12 @@ public final class YoutubePostLiveStreamDvrDashManifestCreator {
                         "Could not get the initialization sequence: response code " + responseCode);
             }
 
-            final Map<String, List<String>> responseHeaders = response.responseHeaders();
-            streamDurationString = responseHeaders.get("X-Head-Time-Millis").get(0);
-            segmentCount = responseHeaders.get("X-Head-Seqnum").get(0);
+            // Header names are looked up case-insensitively here on purpose: depending on the
+            // HTTP protocol version used and on the downloader implementation, the server may
+            // return these headers lowercased (e.g. "x-head-time-millis"), which would make a
+            // direct map lookup fail with a NullPointerException (see TeamNewPipe/NewPipe#13068).
+            streamDurationString = getHeaderCaseInsensitive(response, "X-Head-Time-Millis");
+            segmentCount = getHeaderCaseInsensitive(response, "X-Head-Seqnum");
         } catch (final IndexOutOfBoundsException e) {
             throw new CreationException(
                     "Could not get the value of the X-Head-Time-Millis or the X-Head-Seqnum header",
@@ -153,7 +157,7 @@ public final class YoutubePostLiveStreamDvrDashManifestCreator {
         long streamDuration;
         try {
             streamDuration = Long.parseLong(streamDurationString);
-        } catch (final NumberFormatException e) {
+        } catch (final NumberFormatException | NullPointerException e) {
             streamDuration = durationSecondsFallback;
         }
 
@@ -211,5 +215,38 @@ public final class YoutubePostLiveStreamDvrDashManifestCreator {
         } catch (final DOMException e) {
             throw CreationException.couldNotAddElement("segment (S)", e);
         }
+    }
+
+    /**
+     * Get the first value of a response header, looking up its name case-insensitively.
+     *
+     * <p>
+     * Unlike {@link Response#getHeader(String)}, which returns only the first value and may be
+     * affected by the way the used {@code Downloader} implementation stores headers, this method
+     * searches the raw headers map so that headers returned lowercased by the server or by the
+     * HTTP stack (which is allowed, for example, on HTTP/2 where all header names are lowercase)
+     * are still found.
+     * </p>
+     *
+     * @param response   the response from which to get the header
+     * @param headerName the name of the header to look up, in any case
+     * @return the first value of the header, or {@code null} if the header is not present or has
+     *         an empty list of values
+     */
+    @Nullable
+    private static String getHeaderCaseInsensitive(@Nonnull final Response response,
+                                                   @Nonnull final String headerName) {
+        final Map<String, List<String>> responseHeaders = response.responseHeaders();
+        if (responseHeaders == null) {
+            return null;
+        }
+        return responseHeaders.entrySet().stream()
+                .filter(header -> header.getKey() != null
+                        && header.getKey().equalsIgnoreCase(headerName))
+                .findFirst()
+                .map(Map.Entry::getValue)
+                .filter(Objects::nonNull)
+                .flatMap(values -> values.stream().filter(Objects::nonNull).findFirst())
+                .orElse(null);
     }
 }
